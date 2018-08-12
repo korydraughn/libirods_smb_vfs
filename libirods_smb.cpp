@@ -5,36 +5,18 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 
-//#include <irods/rcGlobalExtern.h>
-//#include <irods/irods_client_api_table.hpp>
-//#include <irods/irods_pack_table.hpp>
-//#include <irods/rodsPath.h>
-//#include <irods_logger.hpp>
-//#include <irods/irods_tcp_object.hpp>
-//#include <irods/irods_network_object.hpp>
-//#include <irods/irods_network_plugin.hpp>
-//#include <irods/irods_network_types.hpp>
 #include <irods/objStat.h>
 #include <irods/openCollection.h>
 #include <irods/closeCollection.h>
 #include <irods/readCollection.h>
+#include <irods/collection.hpp>
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
 
 #include "irods_query.hpp"
-
-/*
-class tcp_network_plugin : public irods::network
-{
-public:
-    tcp_network_plugin(const std::string& _nm, const std::string& _ctx)
-        : irods::network{_nm, _ctx}
-    {
-    }
-};
-*/
 
 namespace
 {
@@ -51,6 +33,9 @@ struct irods_context_t
     std::string cwd;
     std::unordered_map<std::string, long> path_to_fd;
     std::unordered_map<long, std::string> fd_to_path;
+    std::unique_ptr<irods_collection_stream> dir;
+    dirent dir_entry;
+    error_code read_coll_ec;
 };
 
 auto ismb_test() -> error_code
@@ -100,84 +85,11 @@ auto ismb_test() -> error_code
     return 0;
 }
 
-auto ismb_init() -> int
-{
-    /*
-    irods::tcp_object_ptr tcp_obj_ptr{new irods::tcp_object{}};
-
-    irods::network_object_ptr network_obj_ptr = boost::dynamic_pointer_cast<irods::network_object>(tcp_obj_ptr);
-    if (!network_obj_ptr)
-    {
-        std::cout << "dynamic_pointer_cast failed: tcp_object -> network_object\n";
-        return -1;
-    }
-
-    irods::tcp_object_ptr other_tcp_obj_ptr = boost::dynamic_pointer_cast<irods::tcp_object>(network_obj_ptr);
-    if (!other_tcp_obj_ptr)
-    {
-        std::cout << "dynamic_pointer_cast failed: network_object -> tcp_object\n";
-        return -1;
-    }
-
-    tcp_obj_ptr.get();
-    network_obj_ptr.get();
-    other_tcp_obj_ptr.get();
-
-    irods::network_ptr network_ptr{new tcp_network_plugin{"", ""}};
-
-    irods::plugin_ptr plugin_ptr = boost::dynamic_pointer_cast<irods::plugin_base>(network_ptr);
-    if (!plugin_ptr)
-    {
-        std::cout << "dynamic_pointer_cast failed: network -> plugin_base\n";
-        return -1;
-    }
-
-    irods::network_ptr other_network_ptr = boost::dynamic_pointer_cast<irods::network>(plugin_ptr);
-    if (!other_network_ptr)
-    {
-        std::cout << "dynamic_pointer_cast failed: plugin_base -> network\n";
-        return -1;
-    }
-
-    network_ptr.get();
-    plugin_ptr.get();
-    other_network_ptr.get();
-    */
-
-    /*
-    irods::network net_plugin{"", ""};
-    irods::plugin_base* net_pb = &net_plugin;
-    irods::plugin_ptr sp_net_pb{&net_plugin, [](auto) {}};
-    irods::network_ptr net = boost::dynamic_pointer_cast<irods::network>(p_ptr);
-
-    if (!boost::dynamic_pointer_cast<irods::plugin_base>(net))
-    {
-        std::cout << "dynamic cast failed: plugin_base* -> network*\n";
-        return -1;
-    }
-
-    if (!boost::dynamic_pointer_cast<irods::network>(sp_net_pb))
-    {
-        std::cout << "dynamic cast failed: network* -> plugin_base*\n";
-        return -1;
-    }
-
-    if (!dynamic_cast<irods::network*>(net_pb))
-    {
-        std::cout << "dynamic cast failed: plugin_base* -> network*\n";
-        return -1;
-    }
-    */
-
-    return 0;
-}
-
 auto ismb_create_context(const char* _smb_path) -> irods_context*
 {
     auto* ctx = new irods_context{};
-
     ctx->smb_path = boost::filesystem::path{_smb_path}.generic_string();
-
+    std::cout << __func__ << " :: samba share path = " << _smb_path << '\n';
     return ctx;
 }
 
@@ -240,6 +152,7 @@ auto ismb_connect(irods_context* _ctx) -> error_code
     }
 
     _ctx->cwd = get_root_path(_ctx->env);
+    ismb_map(_ctx, _ctx->cwd.c_str());
 
     //log::debug("login successful.");
 
@@ -279,33 +192,42 @@ auto ismb_get_fd_by_path(irods_context* _ctx, const char* _path, irods_fd* _fd) 
 
 auto ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _stat_info) -> error_code
 {
-    std::cout << __func__ << " :: _path = " << _path << '\n';
+    std::cout << __func__ << " :: _path (dirty)  = " << _path << '\n';
+
+    namespace fs = boost::filesystem;
+
+    std::string abs_path;
+
+    if (!_path || std::strcmp(_path, ".") == 0)
+    {
+        abs_path = get_root_path(_ctx->env);
+    }
+    else if (boost::starts_with(_path, "./"))
+    {
+        abs_path = _path;
+        boost::replace_first(abs_path, "./", _ctx->cwd + '/');
+    }
+    else if (boost::starts_with(_path, "/"))
+    {
+        abs_path = _path;
+        boost::replace_first(abs_path, "/", get_root_path(_ctx->env) + '/');
+    }
+    else
+    {
+        abs_path = _ctx->cwd;
+        abs_path += '/';
+        abs_path += _path;
+    }
+
+    boost::replace_first(abs_path, _ctx->smb_path, ""); // Remove the samba share root.
 
     rodsObjStat_t* stat_info_ptr{};
     dataObjInp_t data_obj_input{};
 
-    namespace fs = boost::filesystem;
-
-    std::string dirty_path = _path;
-
-    if ("." == dirty_path)
-    {
-        dirty_path = "";    
-    }
-    else if (".." == dirty_path)
-    {
-        // TODO Haven't encountered this case yet. Not sure what to do here.
-    }
-
-    fs::path path{get_root_path(_ctx->env)};
-    path /= boost::replace_first_copy(dirty_path, _ctx->smb_path, "");
-
-    std::strncpy(data_obj_input.objPath, path.generic_string().c_str(), path.generic_string().length());
+    std::strncpy(data_obj_input.objPath, abs_path.c_str(), abs_path.length());
     std::cout << __func__ << " :: data_obj_input.objPath = " << data_obj_input.objPath << '\n';
 
-    auto ec = rcObjStat(_ctx->conn, &data_obj_input, &stat_info_ptr);
-
-    if (ec < 0)
+    if (auto ec = rcObjStat(_ctx->conn, &data_obj_input, &stat_info_ptr); ec < 0)
         return ec;
 
     std::cout << std::boolalpha;
@@ -313,6 +235,7 @@ auto ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _st
 
     if (stat_info_ptr)
     {
+#if 0
         std::cout << "\nstat results for [" << _path << "]\n";
         std::cout << "- object size = " << stat_info_ptr->objSize << '\n';
         std::cout << "- object type = " << stat_info_ptr->objType << '\n';
@@ -325,13 +248,17 @@ auto ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _st
         std::cout << "- modify time = " << stat_info_ptr->modifyTime << '\n';
         std::cout << "- resc. hier  = " << stat_info_ptr->rescHier << '\n';
         std::cout << '\n';
+#endif
+
+        ismb_map(_ctx, data_obj_input.objPath);
 
         std::memset(_stat_info, 0, sizeof(irods_stat_info));
 
         _stat_info->size = stat_info_ptr->objSize;
         _stat_info->type = stat_info_ptr->objType;
         _stat_info->mode = static_cast<int>(stat_info_ptr->dataMode);
-        _stat_info->id = std::stol(stat_info_ptr->dataId);
+        //_stat_info->id = _ctx->path_to_fd.at(path.generic_string()); //std::stol(stat_info_ptr->dataId);
+        _stat_info->id = _ctx->path_to_fd.at(abs_path);
         std::strncpy(_stat_info->owner_name, stat_info_ptr->ownerName, strlen(stat_info_ptr->ownerName));
         std::strncpy(_stat_info->owner_zone, stat_info_ptr->ownerZone, strlen(stat_info_ptr->ownerZone));
         _stat_info->creation_time = std::stoll(stat_info_ptr->createTime);
@@ -383,7 +310,7 @@ auto ismb_free_string(const char* _string) -> void
 
 auto ismb_change_directory(irods_context* _ctx, const char* _target_dir) -> error_code
 {
-    std::cout << "ismb_change_directory :: _target_dir = " << _target_dir << '\n';
+    std::cout << __func__ << " :: _target_dir = " << _target_dir << '\n';
 
     using namespace std::string_literals;
 
@@ -441,24 +368,41 @@ auto ismb_get_working_directory(irods_context* _ctx, char** _dir) -> error_code
 
 auto ismb_opendir(irods_context* _ctx,
                   const char* _path,
-                  irods_directory_stream* _dir_stream) -> error_code
+                  irods_collection_stream** _coll_stream) -> error_code
 {
-    std::string path = get_root_path(_ctx->env);
-    path += "/";
-    path += _path;
-    //_ctx->cwd = get_root_path(_ctx->env);
-    //_ctx->cwd += "/";
-    //_ctx->cwd += _path;
+    std::cout << __func__ << " :: _path = " << _path << '\n';
 
-    std::cout << "ismb_opendir :: path  = " << path << '\n';
+    std::string path;
+
+    if (!_path || std::strcmp(_path, ".") == 0)
+    {
+        path = _ctx->cwd;
+    }
+    else if (boost::starts_with(_path, "./"))
+    {
+        path = _path;
+        boost::replace_first(path, "./", _ctx->cwd + '/');
+    }
+    else if (boost::starts_with(_path, "/"))
+    {
+        path = _path;
+        boost::replace_first(path, "/", get_root_path(_ctx->env) + '/');
+    }
+    else
+    {
+        path = _ctx->cwd;
+        path += '/';
+        path += _path;
+    }
+
+    std::cout << __func__ << " :: path  = " << path << '\n';
 
     //path.erase(path.find_last_of("/."));
     //path.erase(path.find_last_of("/.."));
     while ('/' == path.back() || '.' == path.back())
         path.erase(path.length() - 1);
 
-    std::cout << "ismb_opendir :: _path = " << _path << '\n';
-    std::cout << "ismb_opendir :: path  = " << path << '\n';
+    std::cout << __func__ << " :: path  = " << path << '\n';
 
     collInp_t coll_input{};
     coll_input.flags = LONG_METADATA_FG;
@@ -468,68 +412,56 @@ auto ismb_opendir(irods_context* _ctx,
 
     if (handle < 0)
     {
-        std::cout << "ismb_opendir :: failed to open collection.\n";
+        std::cout << __func__ << " :: failed to open collection.\n";
         return -1;
     }
 
-    *_dir_stream = handle;
+    _ctx->dir.reset(new irods_collection_stream{handle});
+    *_coll_stream = _ctx->dir.get();
 
     return 0;
 }
 
 auto ismb_fdopendir(irods_context* _ctx,
                     const char* _path,
-                    irods_directory_stream* _dir_stream) -> error_code
+                    irods_collection_stream** _coll_stream) -> error_code
 {
-    _ctx->cwd = get_root_path(_ctx->env);
-    _ctx->cwd += "/";
-    _ctx->cwd += _path;
-
-    std::cout << "ismb_fdopendir :: _path     = " << _path << '\n';
-    std::cout << "ismb_fdopendir :: _ctx->cwd = " << _ctx->cwd << '\n';
-
-    collInp_t coll_input{};
-    coll_input.flags = LONG_METADATA_FG;
-    std::strncpy(coll_input.collName, _ctx->cwd.c_str(), sizeof(coll_input.collName));
-
-    const auto handle = rcOpenCollection(_ctx->conn, &coll_input);
-
-    if (handle < 0)
-    {
-        std::cout << "ismb_fdopendir :: failed to open collection.\n";
-        return -1;
-    }
-
-    *_dir_stream = handle;
-
-    return 0;
+    return ismb_opendir(_ctx, _path, _coll_stream);
 }
 
-auto ismb_readdir(irods_context* _ctx,
-                  irods_directory_stream _dir_stream,
-                  irods_collection_entry* _coll_entry) -> error_code
+auto ismb_readdir(irods_context* _ctx, irods_collection_stream* _coll_stream) -> dirent*
 {
     collEnt_t* coll_entry{};
 
-    if (auto ec = rcReadCollection(_ctx->conn, _dir_stream, &coll_entry); ec < 0)
-        return -1;
+    if (_ctx->read_coll_ec = rcReadCollection(_ctx->conn, *_coll_stream, &coll_entry);
+        _ctx->read_coll_ec < 0)
+    {
+        return nullptr;
+    }
 
-    _coll_entry->inode = coll_entry->dataId ? std::stoi(coll_entry->dataId) : 0;
+    _ctx->dir_entry = {}; // Clear old data.
 
     if (coll_entry->objType == DATA_OBJ_T)
     {
         const auto length = std::strlen(coll_entry->dataName);
-        std::strncpy(_coll_entry->path, coll_entry->dataName, length);
+        std::strncpy(_ctx->dir_entry.d_name, coll_entry->dataName, length);
     }
     else if (coll_entry->objType == COLL_OBJ_T)
     {
-        const auto length = std::strlen(coll_entry->collName);
-        std::strncpy(_coll_entry->path, coll_entry->collName, length);
+        std::string name = coll_entry->collName;
+
+        if (auto pos = name.find_last_of('/'); pos != std::string::npos)
+            name.erase(0, pos + 1);
+
+        std::strncpy(_ctx->dir_entry.d_name, name.c_str(), name.length());
     }
+
+    ismb_map(_ctx, _ctx->dir_entry.d_name);
+    _ctx->dir_entry.d_ino = _ctx->path_to_fd.at(_ctx->dir_entry.d_name);
 
     freeCollEnt(coll_entry);
 
-    return 0;
+    return &_ctx->dir_entry;
 }
 
 error_code ismb_seekdir(irods_context* _ctx, const char* _path)
@@ -537,9 +469,9 @@ error_code ismb_seekdir(irods_context* _ctx, const char* _path)
     return 0;
 }
 
-error_code ismb_telldir(irods_context* _ctx, const char* _path)
+error_code ismb_telldir(irods_context* _ctx)
 {
-    return 0;
+    return _ctx->read_coll_ec >= 0 ? 0 : -1;
 }
 
 error_code ismb_rewind_dir(irods_context* _ctx, const char* _path)
@@ -557,9 +489,10 @@ error_code ismb_rmdir(irods_context* _ctx, const char* _path)
     return 0;
 }
 
-void ismb_closedir(irods_context* _ctx, irods_directory_stream _dir_stream)
+void ismb_closedir(irods_context* _ctx, irods_collection_stream* _coll_stream)
 {
-    rcCloseCollection(_ctx->conn, _dir_stream);
+    rcCloseCollection(_ctx->conn, *_coll_stream);
+    _ctx->dir.reset();
 }
 
 namespace
@@ -567,7 +500,6 @@ namespace
     auto get_root_path(const rodsEnv& _env) -> std::string
     {
         std::string root = "/";
-
         root += _env.rodsZone;
         root += "/home/";
         root += _env.rodsUserName;

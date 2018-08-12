@@ -6,13 +6,10 @@
 
 int main(int _argc, char* _argv[])
 {
-    int initialized = ismb_init();
-    printf("ismb_init :: initialized = %d\n", initialized);
-
     error_code ec = ismb_test();
     printf("ismb_test :: error code = %i\n", ec);
 
-    irods_context* ctx = ismb_create_context(".");
+    irods_context* ctx = ismb_create_context("./irods");
 
     if (!ctx)
     {
@@ -44,24 +41,22 @@ int main(int _argc, char* _argv[])
         }
         */
 
-        irods_directory_stream dir_stream;
-        if (ismb_opendir(ctx, _argv[1], &dir_stream) == 0)
+        irods_collection_stream* coll_stream;
+        if (ismb_opendir(ctx, _argv[1], &coll_stream) == 0)
         {
             printf("listing collection entries ...\n");
 
-            irods_collection_entry entry;
-
             while (1)
             {
-                memset(&entry, 0, sizeof(entry));
+                struct dirent* entry = ismb_readdir(ctx, coll_stream);
 
-                if (ismb_readdir(ctx, dir_stream, &entry) != 0)
+                if (!entry)
                     break;
-
-                printf("ismb_readdir :: entry = %ld, %s\n", entry.inode, entry.path);
+                    
+                printf("ismb_readdir :: entry = %ld, %s\n", entry->d_ino, entry->d_name);
             }
 
-            ismb_closedir(ctx, dir_stream);
+            ismb_closedir(ctx, coll_stream);
         }
     }
     else
