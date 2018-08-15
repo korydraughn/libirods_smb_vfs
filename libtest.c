@@ -23,8 +23,8 @@ int main(int _argc, char* _argv[])
     if (_argc > 1)
     {
         irods_stat_info stats;
-        ec = ismb_stat_path(ctx, _argv[1], &stats);
-        printf("ismb_stat_path :: error code = %i\n", ec);
+        ec = ismb_stat(ctx, _argv[1], &stats);
+        printf("ismb_stat :: error code = %i\n", ec);
 
         /*
         irods_string_array entries;
@@ -57,6 +57,28 @@ int main(int _argc, char* _argv[])
             }
 
             ismb_closedir(ctx, coll_stream);
+        }
+
+        if (_argc > 1)
+        {
+            printf("removed directory [%s] = %i\n", _argv[2], ismb_rmdir(ctx, _argv[2]));
+        }
+
+        if (_argc > 2)
+        {
+            int fd = ismb_open(ctx, _argv[3], O_CREAT | O_TRUNC | O_RDWR, 0777);
+            printf("opened file descriptor = %i\n", fd);
+
+            if (fd >= 0)
+            {
+                const char buf[] = "IT WORKS!!!\n";
+                printf("wrote %d bytes to file.\n", ismb_write(ctx, fd, (void*) buf, sizeof(buf)));
+
+                irods_stat_info stats;
+                printf("ismb_fstat :: error code = %i\n", ismb_fstat(ctx, fd, &stats));
+
+                printf("closed file descriptor = %s\n", (ismb_close(ctx, fd) == 0 ? "true" : "false"));
+            }
         }
     }
     else

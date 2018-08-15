@@ -66,25 +66,19 @@ error_code ismb_connect(irods_context* _ctx);
 
 error_code ismb_disconnect(irods_context* _ctx);
 
-void ismb_map(irods_context* _ctx, const char* _path);
-
-error_code ismb_get_fd_by_path(irods_context* _ctx, const char* _path, irods_fd* _fd);
-
-error_code ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _stat_info);
-
 void ismb_list(irods_context* _ctx, const char* _path, irods_string_array* _entries);
 
 void ismb_free_string_array(irods_string_array* _string_array);
 
 void ismb_free_string(const char* _string);
 
-error_code ismb_change_directory(irods_context* _ctx, const char* _target_dir);
-
 //
 // Directory Operations
 //
 
-error_code ismb_get_working_directory(irods_context* _ctx, char** _dir);
+error_code ismb_chdir(irods_context* _ctx, const char* _target_dir);
+
+void ismb_getwd(irods_context* _ctx, char** _dir);
 
 error_code ismb_opendir(irods_context* _ctx,
                         const char* _path,
@@ -107,6 +101,20 @@ error_code ismb_mkdir(irods_context* _ctx, const char* _path);
 error_code ismb_rmdir(irods_context* _ctx, const char* _path);
 
 void ismb_closedir(irods_context* _ctx, irods_collection_stream* _coll_stream);
+
+//
+// File Operations
+//
+
+int ismb_open(irods_context* _ctx, const char* _filename, int _flags, int _mode);
+
+int ismb_close(irods_context* _ctx, int _fd);
+
+int ismb_write(irods_context* _ctx, int _fd, void* _buffer, int _buffer_size);
+
+error_code ismb_stat(irods_context* _ctx, const char* _path, irods_stat_info* _stat_info);
+
+error_code ismb_fstat(irods_context* _ctx, int _fd, irods_stat_info* _stat_info);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -4,7 +4,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <unordered_map>
+#include <map>
 #include <memory>
 
 #include <irods/objStat.h>
@@ -12,6 +12,8 @@
 #include <irods/closeCollection.h>
 #include <irods/readCollection.h>
 #include <irods/collection.hpp>
+#include <irods/miscUtil.h>
+#include <irods/rmColl.h>
 
 #include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
@@ -20,6 +22,65 @@
 
 namespace
 {
+    template <typename T,
+              typename = std::enable_if_t<std::is_integral_v<T>>>
+    class integral_bimap
+    {
+    public:
+        using path_type     = std::string;
+        using integral_type = T;
+
+        bool map(const path_type& _absolute_path, integral_type _i)
+        {
+            if (auto iter = ints_.find(_absolute_path); iter != std::end(ints_))
+                return false;
+
+            if (auto iter = paths_.find(_i); iter != std::end(paths_))
+                return false;
+
+            ints_[_absolute_path] = _i;
+            paths_[_i] = _absolute_path;
+
+            return true;
+        }
+
+        integral_type insert(const path_type& _absolute_path)
+        {
+            if (auto iter = ints_.find(_absolute_path); iter != std::end(ints_))
+                return iter->second;
+
+            ints_[_absolute_path] = ++counter_;
+            paths_[counter_] = _absolute_path;
+
+            return counter_;
+        }
+
+        void erase(const path_type& _absolute_path)
+        {
+            if (auto iter = ints_.find(_absolute_path); iter != std::end(ints_))
+            {
+                ints_.erase(iter);
+                paths_.erase(iter->second);
+            }
+        }
+
+        integral_type integral(const path_type& _absolute_path) const
+        {
+            return ints_.at(_absolute_path);
+        }
+
+        const path_type& path(integral_type _i) const
+        {
+            return paths_.at(_i);
+        }
+
+    private:
+        integral_type counter_{};
+        // TODO Could replace these with a bimap of some type (maybe boost::bimap?).
+        std::map<path_type, integral_type> ints_;
+        std::map<integral_type, path_type> paths_;
+    };
+
     auto get_root_path(const rodsEnv& _env) -> std::string;
     auto filename(const std::string& _path) -> std::string;
     auto list(rcComm_t* _conn, const std::string& _path) -> std::vector<std::string>;
@@ -31,8 +92,8 @@ struct irods_context_t
     rcComm_t* conn;
     std::string smb_path;
     std::string cwd;
-    std::unordered_map<std::string, long> path_to_fd;
-    std::unordered_map<long, std::string> fd_to_path;
+    integral_bimap<std::int64_t> fsys;
+    integral_bimap<std::int64_t> fd;
     std::unique_ptr<irods_collection_stream> dir;
     dirent dir_entry;
     error_code read_coll_ec;
@@ -152,7 +213,7 @@ auto ismb_connect(irods_context* _ctx) -> error_code
     }
 
     _ctx->cwd = get_root_path(_ctx->env);
-    ismb_map(_ctx, _ctx->cwd.c_str());
+    _ctx->fsys.insert(_ctx->cwd);
 
     //log::debug("login successful.");
 
@@ -167,30 +228,7 @@ auto ismb_disconnect(irods_context* _ctx) -> error_code
     return 0;
 }
 
-auto ismb_map(irods_context* _ctx, const char* _path) -> void
-{
-    static long inode = 0;
-
-    if (_ctx->path_to_fd.find(_path) != std::end(_ctx->path_to_fd))
-        return;
-
-    _ctx->path_to_fd[_path] = ++inode;
-    _ctx->fd_to_path[inode] = _path;
-}
-
-auto ismb_get_fd_by_path(irods_context* _ctx, const char* _path, irods_fd* _fd) -> error_code
-{
-    if (auto iter = _ctx->path_to_fd.find(_path); iter != std::end(_ctx->path_to_fd))
-    {
-        std::strncpy(_fd->path, iter->first.c_str(), iter->first.length());
-        _fd->inode = iter->second;
-        return 0;
-    }
-
-    return 1;
-}
-
-auto ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _stat_info) -> error_code
+auto ismb_stat(irods_context* _ctx, const char* _path, irods_stat_info* _stat_info) -> error_code
 {
     std::cout << __func__ << " :: _path (dirty)  = " << _path << '\n';
 
@@ -250,15 +288,14 @@ auto ismb_stat_path(irods_context* _ctx, const char* _path, irods_stat_info* _st
         std::cout << '\n';
 #endif
 
-        ismb_map(_ctx, data_obj_input.objPath);
+        _ctx->fsys.insert(data_obj_input.objPath);
 
         std::memset(_stat_info, 0, sizeof(irods_stat_info));
 
         _stat_info->size = stat_info_ptr->objSize;
         _stat_info->type = stat_info_ptr->objType;
         _stat_info->mode = static_cast<int>(stat_info_ptr->dataMode);
-        //_stat_info->id = _ctx->path_to_fd.at(path.generic_string()); //std::stol(stat_info_ptr->dataId);
-        _stat_info->id = _ctx->path_to_fd.at(abs_path);
+        _stat_info->id = _ctx->fsys.insert(data_obj_input.objPath);
         std::strncpy(_stat_info->owner_name, stat_info_ptr->ownerName, strlen(stat_info_ptr->ownerName));
         std::strncpy(_stat_info->owner_zone, stat_info_ptr->ownerZone, strlen(stat_info_ptr->ownerZone));
         _stat_info->creation_time = std::stoll(stat_info_ptr->createTime);
@@ -308,37 +345,29 @@ auto ismb_free_string(const char* _string) -> void
     delete[] _string;
 }
 
-auto ismb_change_directory(irods_context* _ctx, const char* _target_dir) -> error_code
+auto ismb_chdir(irods_context* _ctx, const char* _target_dir) -> error_code
 {
-    std::cout << __func__ << " :: _target_dir = " << _target_dir << '\n';
+    std::cout << __func__ << " :: _target_dir    = " << _target_dir << '\n';
+    std::cout << __func__ << " :: _ctx->smb_path = " << _ctx->smb_path << '\n';
 
     using namespace std::string_literals;
 
-    if (_target_dir == "."s)
-        return 0;
-
-    namespace fs = boost::filesystem;
-
-    if (_target_dir == ".."s)
+    if (_target_dir == "/"s || _target_dir == _ctx->smb_path)
     {
-        // If the user is at the root of the directory tree, then do nothing.
-        if (_target_dir == get_root_path(_ctx->env))
-        {
-            std::cout << "ismb_change_directory :: at root directory\n";
-            return 0;
-        }
-
-        _ctx->cwd = fs::path{_ctx->cwd}.parent_path().generic_string();
-        std::cout << "ismb_change_directory :: new working directory = " << _ctx->cwd << '\n';
-
+        _ctx->cwd = get_root_path(_ctx->env);
         return 0;
     }
 
-    const auto path = (fs::path{_ctx->cwd} / _target_dir).generic_string();
-    std::cout << "ismb_change_directory :: new path = " << path << '\n';
+    // Verify that the directory exists.
+
+    namespace fs = boost::filesystem;
+
+    const auto cwd = (fs::path{_ctx->cwd} / _target_dir).generic_string();
+
+    std::cout << __func__ << " :: possible new working directory = " << cwd << '\n';
 
     auto sql = "select count(COLL_NAME) where COLL_NAME = '"s;
-    sql += path;
+    sql += cwd;
     sql += "'";
 
     for (const auto& row : irods::query{_ctx->conn, sql})
@@ -347,23 +376,22 @@ auto ismb_change_directory(irods_context* _ctx, const char* _target_dir) -> erro
         {
             if (value == "1")
             {
-                _ctx->cwd = path;
-                std::cout << "ismb_change_directory :: new working directory = " << _ctx->cwd << '\n';
+                _ctx->cwd = cwd;
+                std::cout << __func__ << " :: new working directory = " << _ctx->cwd << '\n';
                 return 0;
             }
         }
     }
 
-    std::cout << "ismb_change_directory :: invalid directory\n";
+    std::cout << __func__ << " :: invalid directory.\n";
 
-    return 1;
+    return -1;
 }
 
-auto ismb_get_working_directory(irods_context* _ctx, char** _dir) -> error_code
+auto ismb_getwd(irods_context* _ctx, char** _dir) -> void
 {
     *_dir = new char[_ctx->cwd.length() + 1] {};
     std::strncpy(*_dir, _ctx->cwd.c_str(), _ctx->cwd.length());
-    return 0;
 }
 
 auto ismb_opendir(irods_context* _ctx,
@@ -433,8 +461,9 @@ auto ismb_readdir(irods_context* _ctx, irods_collection_stream* _coll_stream) ->
 {
     collEnt_t* coll_entry{};
 
-    if (_ctx->read_coll_ec = rcReadCollection(_ctx->conn, *_coll_stream, &coll_entry);
-        _ctx->read_coll_ec < 0)
+    _ctx->read_coll_ec = rcReadCollection(_ctx->conn, *_coll_stream, &coll_entry);
+
+    if (_ctx->read_coll_ec < 0)
     {
         return nullptr;
     }
@@ -456,8 +485,7 @@ auto ismb_readdir(irods_context* _ctx, irods_collection_stream* _coll_stream) ->
         std::strncpy(_ctx->dir_entry.d_name, name.c_str(), name.length());
     }
 
-    ismb_map(_ctx, _ctx->dir_entry.d_name);
-    _ctx->dir_entry.d_ino = _ctx->path_to_fd.at(_ctx->dir_entry.d_name);
+    _ctx->dir_entry.d_ino = _ctx->fsys.insert(_ctx->dir_entry.d_name);
 
     freeCollEnt(coll_entry);
 
@@ -481,11 +509,57 @@ error_code ismb_rewind_dir(irods_context* _ctx, const char* _path)
 
 error_code ismb_mkdir(irods_context* _ctx, const char* _path)
 {
+    std::cout << __func__ << " :: _path = " << _path << '\n';
+
+    auto abs_path = _ctx->cwd;
+    abs_path += '/';
+    abs_path += _path;
+
+    std::cout << __func__ << " :: abs_path = " << abs_path << '\n';
+
+    char coll_path[1024]{};
+    std::strncpy(coll_path, abs_path.c_str(), abs_path.length());
+
+    if (auto ec = mkColl(_ctx->conn, coll_path); ec != 0)
+    {
+        std::cout << __func__ << " :: mkColl() failed.\n";
+        return -1;
+    }
+
+    _ctx->fsys.insert(abs_path);
+
     return 0;
 }
 
 error_code ismb_rmdir(irods_context* _ctx, const char* _path)
 {
+    std::cout << __func__ << " :: _path = " << _path << '\n';
+
+    auto abs_path = _ctx->cwd;
+    abs_path += '/';
+    abs_path += _path;
+
+    std::cout << __func__ << " :: abs_path = " << abs_path << '\n';
+
+    char coll_path[1024]{};
+    std::strncpy(coll_path, abs_path.c_str(), abs_path.length());
+
+    collInp_t coll_input{};
+    std::strncpy(coll_input.collName, abs_path.c_str(), abs_path.length());
+
+    //addKeyVal(&coll_input.condInput, FORCE_FLAG_KW, "");
+    //addKeyVal(&coll_input.condInput, RECURSIVE_OPR__KW, "");
+
+    constexpr int verbose = 0;
+    if (auto ec = rcRmColl(_ctx->conn, &coll_input, verbose); ec < 0)
+    {
+        std::cout << __func__ << " :: rcRmColl() failed.\n";
+        return -1;
+    }
+
+    _ctx->fsys.erase(abs_path);
+    std::cout << __func__ << " :: collection removed.\n";
+
     return 0;
 }
 
@@ -493,6 +567,72 @@ void ismb_closedir(irods_context* _ctx, irods_collection_stream* _coll_stream)
 {
     rcCloseCollection(_ctx->conn, *_coll_stream);
     _ctx->dir.reset();
+}
+
+//
+// File Operations
+//
+
+auto ismb_open(irods_context* _ctx, const char* _filename, int _flags, int _mode) -> int
+{
+    namespace fs = boost::filesystem;
+
+    std::cout << __func__ << " :: _filename = " << _filename << '\n';
+    std::cout << __func__ << " :: _flags    = " << _flags << '\n';
+    std::cout << __func__ << " :: _mode     = " << _mode << '\n';
+
+    dataObjInp_t args{};
+
+    args.createMode = _mode;
+    args.openFlags = _flags;
+
+    auto abs_path = _ctx->cwd;
+    abs_path += '/';
+    abs_path += fs::path{_filename}.filename().generic_string();
+    std::cout << __func__ << " :: abs_path  = " << abs_path << '\n';
+    rstrcpy(args.objPath, abs_path.c_str(), MAX_NAME_LEN);
+
+    addKeyVal(&args.condInput, RESC_NAME_KW, _ctx->env.rodsDefResource);
+    std::cout << __func__ << " :: def. resc = " << _ctx->env.rodsDefResource << '\n';
+
+    if (const auto fd = rcDataObjOpen(_ctx->conn, &args); fd >= 0)
+    {
+        _ctx->fd.map(abs_path, fd);
+        return fd;
+    }
+
+    return -1;
+}
+
+auto ismb_close(irods_context* _ctx, int _fd) -> int
+{
+    openedDataObjInp_t args{};
+
+    args.l1descInx = _fd;
+
+    if (rcDataObjClose(_ctx->conn, &args) < 0)
+        return -1;
+
+    return 0;
+}
+
+auto ismb_write(irods_context* _ctx, int _fd, void* _buffer, int _buffer_size) -> int
+{
+    openedDataObjInp_t obj_args{};
+    obj_args.l1descInx = _fd;
+
+    bytesBuf_t buf_args{};
+    buf_args.buf = _buffer;
+    buf_args.len = _buffer_size;
+
+    return rcDataObjWrite(_ctx->conn, &obj_args, &buf_args);
+}
+
+auto ismb_fstat(irods_context* _ctx, int _fd, irods_stat_info* _stat_info) -> error_code
+{
+    namespace fs = boost::filesystem;
+    const auto filename = fs::path{_ctx->fd.path(_fd)}.filename().generic_string();
+    return ismb_stat(_ctx, filename.c_str(), _stat_info);
 }
 
 namespace
