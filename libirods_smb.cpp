@@ -592,6 +592,7 @@ auto ismb_open(irods_context* _ctx, const char* _filename, int _flags, int _mode
     std::cout << __func__ << " :: abs_path  = " << abs_path << '\n';
     rstrcpy(args.objPath, abs_path.c_str(), MAX_NAME_LEN);
 
+    // FIXME The client must have a default resource defined for this to work!
     addKeyVal(&args.condInput, RESC_NAME_KW, _ctx->env.rodsDefResource);
     std::cout << __func__ << " :: def. resc = " << _ctx->env.rodsDefResource << '\n';
 
@@ -633,6 +634,24 @@ auto ismb_fstat(irods_context* _ctx, int _fd, irods_stat_info* _stat_info) -> er
     namespace fs = boost::filesystem;
     const auto filename = fs::path{_ctx->fd.path(_fd)}.filename().generic_string();
     return ismb_stat(_ctx, filename.c_str(), _stat_info);
+}
+
+auto ismb_unlink(irods_context* _ctx, const char* _filename) -> error_code
+{
+    std::cout << __func__ << " :: _filename = " << _filename << '\n';
+
+    auto abs_path = _ctx->cwd;
+    abs_path += '/';
+    abs_path += _filename;
+
+    dataObjInp_t args{};
+    rstrcpy(args.objPath, abs_path.c_str(), MAX_NAME_LEN);
+
+    // Permanently deletes data object instead of moving it to the
+    // trash collection.
+    //addKeyVal(&args.condInput, FORCE_FLAG_KW, "");
+
+    return rcDataObjUnlink(_ctx->conn, &args);
 }
 
 namespace

@@ -116,6 +116,8 @@ error_code ismb_stat(irods_context* _ctx, const char* _path, irods_stat_info* _s
 
 error_code ismb_fstat(irods_context* _ctx, int _fd, irods_stat_info* _stat_info);
 
+error_code ismb_unlink(irods_context* _ctx, const char* _filename);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
